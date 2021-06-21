@@ -1,0 +1,203 @@
+# Depending on out-of-place or in-place option it will decide which template to run
+
+trigger: none
+pool: 'POOL-NAME-HERE'
+
+parameters:
+- name: booleanValue
+  displayName: Something True/False
+  values:
+  - true
+  - false
+  default: false
+
+- name: parameterHere
+  displayName: Parameter here description
+  values:
+  - somevalue
+  - anothervalue
+  default: somevalue
+
+- name: environment
+  displayName: Environment
+  values:
+  - test
+  - dev
+  - pat
+  - prod
+  default: test
+- name: application
+  type: string
+  default:
+  values:
+  - application1
+  - application2
+
+resources:
+  repositories:
+  - repository: repo1
+    type: git
+    name: PROJECTNAME/main-repo
+    ref: refs/heads/main
+  - repository: repo2
+    type: git
+    name: PROJECTNAME/variable-repository
+    ref: refs/heads/main
+
+# Set variables
+variables:
+- template: generic.yml@variable-repository
+- template: default_pipeline_environment.yml@variable-repository
+
+- name: namespace
+  value: mynamespace
+- name: maybeanotherparameter
+  value: anothervalue
+- name: imageName
+  value: nginx:stable-alpine
+
+stages:
+  - stage: Plan_${{ parameters.environment }}
+    jobs:
+    - job: Plan  # name of the job, no spaces allowed
+      displayName: "Check required variables and create the yaml artifact"  # friendly name to display in the UI
+      workspace:
+        clean: all
+      steps:
+
+      - checkout: self
+        fetchDepth: 1 # shallow Git copy
+        clean: true
+        path: pathheretocheckout
+
+      - checkout: variable-repository
+        fetchDepth: 1 # shallow Git copy
+        path: variable-repository
+
+      - task: CmdLine@2
+        displayName: 'Create pipeline variables'
+        inputs:
+          script: |
+            #!/bin/bash
+
+            ls -lah $(Pipeline.Workspace)
+
+            if [ "${{ parameters.application }}" == "" ]; then
+              echo "##[error] No variable set for application"
+              exit 1
+            fi
+
+            echo "##[debug] A debug message here"
+            echo "##vso[task.setvariable variable=createVariable;isSecret=false]VariableValueHere"
+            echo "##vso[task.setvariable variable=createVariable;isSecret=true]SecretValueHere"
+
+            # Check if a file exist
+            if [ ! -f "${somepath}/${somefile}" ]; then
+              echo "##[error] File ${somepath}/${somefile} not found"
+              exit 1
+            fi
+
+      - task: AzureCLI@1
+        displayName: 'Azure cli'
+        name: 'example_azcli'
+        inputs:
+          azureSubscription: azureSubscriptionNameHere
+          scriptLocation: 'inlineScript'
+          addSpnToEnvironment: true
+          inlineScript: |
+            #!/bin/bash
+
+            # now we can use az cli commands here
+            KEYVAULT_ID=$(az keyvault show --name $keyvault_name --resource-group $keyvault_resource_group --query 'id' --output tsv)
+
+            az aks get-credentials --overwrite-existing \
+              --resource-group "$(cluster_rg_name)" \
+              --name "$(cluster_name)"
+
+            kubectl apply -n $(namespace) --kustomize $(Pipeline.Workspace)/template/
+
+
+      - template: /pipelines/templates/templatefile.ymlmain-repo
+        parameters:
+          environment:
+            env: ${{ parameters.environment }}
+            workfile: ${{ parameters.application }}
+
+      - ${{ if eq(parameters.booleanValue, True) }}:
+        - template: pipeline-templates/task1-plan.yaml
+          parameters:
+            env: ${{ parameters.environment}}
+            parameterHere: ${{ parameters.parameterHere }}
+            ${{ if eq(environment.environment, 'test') }}:
+              spn: $(spntest) # From variable-repository
+            ${{ if eq(environment.environment, 'dev') }}:
+              spn: $(spndev) # From variable-repository
+            ${{ if eq(environment.environment, 'pat') }}:
+              spn: $(spnpat) # From variable-repository
+            ${{ if eq(environment.environment, 'prod') }}:
+              spn: $(spnprd) # From variable-repository
+
+      - ${{ if not(eq(parameters.booleanValue, True)) }}:
+        - template: pipeline-templates/task2-plan.yaml
+          parameters:
+            env: ${{ parameters.environment}}
+            parameterHere: ${{ parameters.parameterHere }}
+            ${{ if eq(environment.environment, 'test') }}:
+              spn: $(spntest) # From variable-repository
+            ${{ if eq(environment.environment, 'dev') }}:
+              spn: $(spndev) # From variable-repository
+            ${{ if eq(environment.environment, 'pat') }}:
+              spn: $(spnpat) # From variable-repository
+            ${{ if eq(environment.environment, 'prod') }}:
+              spn: $(spnprd) # From variable-repository
+
+  - stage: Deploy_${{ parameters.environment}}
+    jobs:
+    - deployment: deploy
+      workspace:
+        clean: all
+
+      # Environment
+      ${{ if eq(environment.environment, 'test') }}:
+        environment: $(approvalenv${{ parameters.application }}test)
+      ${{ if eq(environment.environment, 'dev') }}:
+        environment: $(approvalenv${{ parameters.application }}dev)
+      ${{ if eq(environment.environment, 'pat') }}:
+        environment: $(approvalenv${{ parameters.application }}pat)
+      ${{ if eq(environment.environment, 'prod') }}:
+        environment: $(approvalenv${{ parameters.application }}prod)
+
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            # we don't need the git files. We grabbed everything from the artifact
+            - checkout: none
+
+            # What we do need is the artifact. Let's download the artifact named 'example-artifact'
+            - download: current
+              artifact: 'example-artifact'
+
+            - ${{ if eq(parameters.booleanValue, True) }}:
+              - template: pipeline-templates/task1-deploy.yaml
+                parameters:
+                  ${{ if eq(environment.environment, 'test') }}:
+                    spn: $(spntest)
+                  ${{ if eq(environment.environment, 'dev') }}:
+                    spn: $(spndev)
+                  ${{ if eq(environment.environment, 'pat') }}:
+                    spn: $(spnpat)
+                  ${{ if eq(environment.environment, 'prod') }}:
+                    spn: $(spnprd)
+
+            - ${{ if not(eq(parameters.booleanValue, True)) }}:
+              - template: pipeline-templates/task2-deploy.yaml
+                parameters:
+                  ${{ if eq(environment.environment, 'test') }}:
+                    spn: $(spntest)
+                  ${{ if eq(environment.environment, 'dev') }}:
+                    spn: $(spndev)
+                  ${{ if eq(environment.environment, 'pat') }}:
+                    spn: $(spnpat)
+                  ${{ if eq(environment.environment, 'prod') }}:
+                    spn: $(spnprd)
